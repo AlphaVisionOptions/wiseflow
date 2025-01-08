@@ -1,3 +1,9 @@
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
 import asyncio
 from general_process import main_process, pb, wiseflow_logger
 
