@@ -1,6 +1,6 @@
 import os
 from openai import AsyncOpenAI as OpenAI
-from openai import RateLimitError
+# from openai import RateLimitError
 import asyncio
 
 base_url = os.environ.get('LLM_API_BASE', "")
@@ -30,31 +30,15 @@ async def openai_llm(messages: list, model: str, logger=None, **kwargs) -> str:
     try:
         response = await client.chat.completions.create(messages=messages, model=model, **kwargs)
         resp = response.choices[0].message.content
-    except RateLimitError as e:
-        if logger:
-            logger.warning(f'{e}\nRetrying in 60 second...')
-        else:
-            print(f'{e}\nRetrying in 60 second...')
-        await asyncio.sleep(60)
-        response = await client.chat.completions.create(messages=messages, model=model, **kwargs)
-        if response.status_code == 200 and response.choices:
-            resp = response.choices[0].message.content
-        else:
-            if logger:
-                logger.error(f'after many try, llm error: {response}')
-            else:
-                print(f'after many try, llm error: {response}')
-
     except Exception as e:
         if logger:
-            logger.error(f'openai_llm error: {e}')
+            logger.warning(e)
         else:
-            print(f'openai_llm error: {e}')
-
+            print(e)
     finally:
         semaphore.release()
 
-    if logger:
+    if logger and resp:
         logger.debug(f'result:\n {response.choices[0]}')
         logger.debug(f'usage:\n {response.usage}')
     return resp

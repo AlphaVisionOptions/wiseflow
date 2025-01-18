@@ -1,183 +1,90 @@
 # -*- coding: utf-8 -*-
-import os, re, sys
+import os, sys
 import json
 import asyncio
 import time
-from prompts import *
+from datetime import datetime
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)  # get parent dir
-sys.path.append(project_root)
+# 将core目录添加到Python路径
+core_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core')
+sys.path.append(core_path)
 
-from core.llms.openai_wrapper import openai_llm as llm
+# 现在可以直接导入模块，因为core目录已经在Python路径中
+from scrapers import *
+from agents.get_info import pre_process
 
-models = ['Qwen/Qwen2.5-14B-Instruct',  'Qwen/Qwen2.5-32B-Instruct', 'deepseek-ai/DeepSeek-V2.5', 'Qwen/Qwen2.5-72B-Instruct']
+from utils.general_utils import is_chinese
+from agents.get_info import get_author_and_publish_date, get_info, get_more_related_urls
+from agents.get_info_prompts import *
 
-async def main(link_dict: dict, text: str, record_file: str, prompts: list, focus_points: list):
-    # first get more links
-    _to_be_processed = []
-    link_map = {}
-    for i, (url, des) in enumerate(link_dict.items()):
-        des = des.replace('\n', ' ')
-        _to_be_processed.append(f'<t{i+1}>//{des}//')
-        link_map[f'<t{i+1}'] = url
+benchmark_model = 'Qwen/Qwen2.5-72B-Instruct'
+models = ['Qwen/Qwen2.5-7B-Instruct', 'Qwen/Qwen2.5-14B-Instruct',  'Qwen/Qwen2.5-32B-Instruct', 'deepseek-ai/DeepSeek-V2.5']
 
-    for model in models:
+async def main(sample: dict, include_ap: bool, prompts: list, focus_dict: dict, record_file: str):
+    link_dict, links_parts, contents = sample['link_dict'], sample['links_part'], sample['contents']
+    get_link_sys_prompt, get_link_suffix_prompt, get_info_sys_prompt, get_info_suffix_prompt = prompts
+
+    for model in [benchmark_model] + models:
+        links_texts = []
+        for _parts in links_parts:
+            links_texts.extend(_parts.split('\n\n'))
+        contents = sample['contents'].copy()
+
         print(f"running {model} ...")
         start_time = time.time()
-        get_more_links_hallucination_times = 0
-        more_links = set()
-        text_batch = ''
-        for t in _to_be_processed:
-            text_batch = f'{text_batch}{t}\n'
-            if len(text_batch) > 2048:
-                content = f'<text>\n{text_batch}</text>\n\n{text_link_suffix}'
-                result = await llm(
-                    [{'role': 'system', 'content': prompts[0]}, {'role': 'user', 'content': content}],
-                    model=model, temperature=0.1)
-                print(f"llm output\n{result}")
-                text_batch = ''
-                result = re.findall(r'\"\"\"(.*?)\"\"\"', result, re.DOTALL)
-                result = result[-1]
-                for item in result.split('\n'):
-                    if not item:
-                        continue
-                    segs = item.split('>')
-                    if len(segs) != 2:
-                        get_more_links_hallucination_times += 1
-                        continue
-                    _index, focus = segs
-                    _index = _index.strip()
-                    focus = focus.strip().strip('//')
-                    if focus == 'NA':
-                        continue
-                    if focus not in focus_points or _index not in link_map:
-                        get_more_links_hallucination_times += 1
-                        continue
-                    more_links.add(link_map[_index])
-                
-        if text_batch:
-            content = f'<text>\n{text_batch}</text>\n\n{text_link_suffix}'
-            result = await llm(
-                [{'role': 'system', 'content': prompts[0]}, {'role': 'user', 'content': content}],
-                model=model, temperature=0.1)
-            print(f"llm output\n{result}")
-            result = re.findall(r'\"\"\"(.*?)\"\"\"', result, re.DOTALL)
-            result = result[-1]
-            for item in result.split('\n'):
-                if not item:
-                    continue
-                segs = item.split('>')
-                if len(segs) != 2:
-                    get_more_links_hallucination_times += 1
-                    continue
-                _index, focus = segs
-                _index = _index.strip()
-                focus = focus.strip().strip('//')
-                if focus == 'NA':
-                    continue
-                if focus not in focus_points or _index not in link_map:
-                    get_more_links_hallucination_times += 1
-                    continue
-                more_links.add(link_map[_index])
-
-        t1 = time.time()
-        get_more_links_time = t1 - start_time
-        print(f"get more links time: {get_more_links_time}")
-
-        # second get more infos
-        lines = text.split('\n')
-        cache = set()
-        text_batch = ''
-        for line in lines:
-            text_batch = f'{text_batch}{line}\n'
-            if len(text_batch) > 5000:
-                #print(f"text_batch\n{text_batch}")
-                content = f'<text>\n{text_batch}</text>\n\n{text_info_suffix}'
-                result = await llm(
-                    [{'role': 'system', 'content': prompts[1]}, {'role': 'user', 'content': content}],
-                    model=model, temperature=0.1)
-                print(f"llm output\n{result}")
-                text_batch = ''
-                result = re.findall(r'\"\"\"(.*?)\"\"\"', result, re.DOTALL)
-                cache.add(result[-1])
-
-        if text_batch:
-            #print(f"text_batch\n{text_batch}")
-            content = f'<text>\n{text_batch}</text>\n\n{text_info_suffix}'
-            result = await llm(
-                [{'role': 'system', 'content': prompts[1]}, {'role': 'user', 'content': content}],
-                model=model, temperature=0.1)
-            print(f"llm output\n{result}")
-            result = re.findall(r'\"\"\"(.*?)\"\"\"', result, re.DOTALL)
-            cache.add(result[-1])
-
-        get_infos_hallucination_times = 0
-        infos = []
-        for item in cache:
-            segs = item.split('//')
-            i = 0
-            while i < len(segs) - 1:
-                focus = segs[i].strip()
-                if not focus:
-                    i += 1
-                    continue
-                if focus not in focus_points:
-                    get_infos_hallucination_times += 1
-                    i += 1
-                    continue
-                content = segs[i+1].strip().strip('摘要').strip(':').strip('：')
-                i += 2
-                if content and content != 'NA':
-                    infos.append(f'{focus}: {content}')
-            """
-            maybe can use embedding retrieval to judge
-            """
-        t2 = time.time()
-        get_infos_time = t2 - t1
-        print(f"get more infos time: {get_infos_time}")
-
-        # get author and publish date from text
-        if len(text) > 1024:
-            usetext = f'{text[:500]}......{text[-500:]}'
+        if include_ap:
+            author, publish_date = await get_author_and_publish_date(contents[0], model, test_mode=True)
+            get_ap_time = time.time() - start_time
+            print(f"get author and publish date time: {get_ap_time}")
         else:
-            usetext = text
-        content = f'<text>\n{usetext}\n</text>\n\n{text_ap_suffix}'
-        llm_output = await llm([{'role': 'system', 'content': text_ap_system}, {'role': 'user', 'content': content}],
-                               model=model, max_tokens=50, temperature=0.1)
-        print(f"llm output: {llm_output}")
-        ap_ = llm_output.strip().strip('"')
+            author, publish_date = '', ''
+            get_ap_time = 0
 
-        print("*" * 12)
-        print('\n\n')
+        start_time = time.time()
+        more_url = await get_more_related_urls(links_texts, link_dict, [get_link_sys_prompt, get_link_suffix_prompt, model], test_mode=True)
+        get_more_url_time = time.time() - start_time
+        print(f"get more related urls time: {get_more_url_time}")
 
-        more_links_to_record = [f'{link_dict[link]}:{link}' for link in more_links]
-        more_links_to_record = '\n'.join(more_links_to_record)
-        infos_to_record = '\n'.join(infos)
+        start_time = time.time()
+        infos = await get_info(contents, link_dict, [get_info_sys_prompt, get_info_suffix_prompt, model], focus_dict, author, publish_date, test_mode=True)
+        get_info_time = time.time() - start_time
+        print(f"get info time: {get_info_time}")
 
+        if model == benchmark_model:
+            benchmark_result = more_url.copy()
+            diff = f'benchmark: {len(benchmark_result)} results'
+        else:
+            missing_in_cache = len(benchmark_result - more_url)  # benchmark中有但cache中没有的
+            extra_in_cache = len(more_url - benchmark_result)    # cache中有但benchmark中没有的
+            total_diff = missing_in_cache + extra_in_cache
+            diff = f'差异{total_diff}个(遗漏{missing_in_cache}个,多出{extra_in_cache}个)'
+
+        related_urls_to_record = '\n'.join(more_url)
+        infos_to_record = [f"{fi['tag']}: {fi['content']}" for fi in infos]
+        infos_to_record = '\n'.join(infos_to_record)
         with open(record_file, 'a') as f:
-            f.write(f"llm model: {model}\n")
-            f.write(f"get more links time: {get_more_links_time} s\n")
-            f.write(f"bad generate times during get more links: {get_more_links_hallucination_times}\n")
-            f.write(f"get more infos time: {get_infos_time} s\n")
-            f.write(f"bad generate times during get more infos: {get_infos_hallucination_times}\n")
-            f.write(f"total more links: {len(more_links)}\n")
-            f.write(f"total infos: {len(infos)}\n")
-            f.write(f"author and publish time: {ap_}\n")
-            f.write(f"infos: \n{infos_to_record}\n")
-            f.write(f"more links: \n{more_links_to_record}\n")
-            f.write("*" * 12)
+            f.write(f"model: {model}\n")
+            if include_ap:
+                f.write(f"get author and publish date time: {get_ap_time}\n")
+                f.write(f"author: {author}\n")
+                f.write(f"publish date: {publish_date}\n")
+            f.write(f"get more related urls time: {get_more_url_time}\n")
+            f.write(f"diff from benchmark: {diff}\n")
+            f.write(f"get info time: {get_info_time}\n")
+            f.write(f"related urls: \n{related_urls_to_record}\n")
+            f.write(f"final result: \n{infos_to_record}\n")
             f.write('\n\n')
- 
+        print('\n\n')
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--sample_dir', '-D', type=str, default='')
+    parser.add_argument('--include_ap', '-I', type=bool, default=False)
     args = parser.parse_args()
 
     sample_dir = args.sample_dir
-
+    include_ap = args.include_ap
     if not os.path.exists(os.path.join(sample_dir, 'focus_point.json')):
         raise ValueError(f'{sample_dir} focus_point.json not found')
     
@@ -188,34 +95,43 @@ if __name__ == '__main__':
         expl = item["explanation"]
         focus_statement = f"{focus_statement}//{tag}//\n"
         if expl:
-            focus_statement = f"{focus_statement}解释：{expl}\n"
+            if is_chinese(expl):
+                focus_statement = f"{focus_statement}解释：{expl}\n"
+            else:
+                focus_statement = f"{focus_statement}Explanation: {expl}\n"
+    
+    focus_dict = {item["focuspoint"]: item["focuspoint"] for item in focus_points}
+    date_stamp = datetime.now().strftime('%Y-%m-%d')
+    if is_chinese(focus_statement):
+        get_link_sys_prompt = get_link_system.replace('{focus_statement}', focus_statement)
+        get_link_sys_prompt = f"今天的日期是{date_stamp}，{get_link_sys_prompt}"
+        get_link_suffix_prompt = get_link_suffix
+        get_info_sys_prompt = get_info_system.replace('{focus_statement}', focus_statement)
+        get_info_sys_prompt = f"今天的日期是{date_stamp}，{get_info_sys_prompt}"
+        get_info_suffix_prompt = get_info_suffix
+    else:
+        get_link_sys_prompt = get_link_system_en.replace('{focus_statement}', focus_statement)
+        get_link_sys_prompt = f"today is {date_stamp}, {get_link_sys_prompt}"
+        get_link_suffix_prompt = get_link_suffix_en
+        get_info_sys_prompt = get_info_system_en.replace('{focus_statement}', focus_statement)
+        get_info_sys_prompt = f"today is {date_stamp}, {get_info_sys_prompt}"
+        get_info_suffix_prompt = get_info_suffix_en
 
-    get_info_system = text_info_system.replace('{focus_statement}', focus_statement)
-    get_link_system = text_link_system.replace('{focus_statement}', focus_statement)
-    prompts = [get_link_system, get_info_system]
-    focus_points = [item["focuspoint"] for item in focus_points]
+    prompts = [get_link_sys_prompt, get_link_suffix_prompt, get_info_sys_prompt, get_info_suffix_prompt]
 
     time_stamp = time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime())
     record_file = os.path.join(sample_dir, f'record-{time_stamp}.txt')
     with open(record_file, 'w') as f:
         f.write(f"focus statement: \n{focus_statement}\n\n")
 
-    for dirs in os.listdir(sample_dir):
-        if not os.path.isdir(os.path.join(sample_dir, dirs)):
+    for file in os.listdir(sample_dir):
+        if not file.endswith('_processed.json'):
             continue
-        _path = os.path.join(sample_dir, dirs)
-        print(f'start testing {_path}')
-        if 'sample_recognized.json' not in os.listdir(_path):
-            print(f'{dirs} sample_recognized.json not found, use sample.json instead')
-            if 'sample.json' not in os.listdir(_path):
-                print(f'{dirs} sample.json not found, skip')
-                continue
-            sample_recognized = json.load(open(os.path.join(_path, 'sample.json'), 'r'))
-        else:
-            sample_recognized = json.load(open(os.path.join(_path, 'sample_recognized.json'), 'r'))
-        
-        link_dict = sample_recognized['link_dict']
-        text = sample_recognized['text']
+        sample = json.load(open(os.path.join(sample_dir, file), 'r'))
+        if 'links_part' not in sample or 'link_dict' not in sample or 'contents' not in sample:
+            print(f'{file} not valid sample, skip')
+            continue
         with open(record_file, 'a') as f:
-            f.write(f"raw materials in: {dirs}\n\n")
-        asyncio.run(main(link_dict, text, record_file, prompts, focus_points))
+            f.write(f"raw materials: {file}\n\n")
+        print(f'start testing {file}')
+        asyncio.run(main(sample, include_ap, prompts, focus_dict, record_file))
